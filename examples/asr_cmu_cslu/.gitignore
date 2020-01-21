@@ -1,0 +1,13 @@
+#
+#Ignore all data, exp results and features
+data
+exp
+fbank
+mfcc
+cmu_kids
+cslu
+results
+
+# notes and shortcuts
+run_options
+note
