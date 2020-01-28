@@ -82,14 +82,14 @@ fi
 if [ ${stage} -le 1 ]; then
     echo "Stage 1: Data Preparation"
     # Prepare data
-    # ./local/prepare_cmu/cmu_data_prep.sh  
-    # ./local/prepare_cslu/cslu_data_prep.sh 
-    # 
-    # # Split data
-    # python3 local/db/db_utils.py random_split \
-    #     "('train', $train_rate)" "('dev', $dev_rate)"  "('test', $test_rate)" \
-    #     --db_file $all_data_db \
-    #     --split_by $split_by
+    ./local/prepare_cmu/cmu_data_prep.sh  
+    ./local/prepare_cslu/cslu_data_prep.sh 
+    
+    # Split data
+    python3 local/db/db_utils.py random_split \
+        "('train', $train_rate)" "('dev', $dev_rate)"  "('test', $test_rate)" \
+        --db_file $all_data_db \
+        --split_by $split_by
      
     # Write split ata
     for corp in cmu cslu; do
@@ -159,7 +159,7 @@ if [ ${stage} -le 3 ]; then
     # mkdir -p data/lang
     # cut -f 2- -d" " data/${train_set}/text > data/lang/input
     # echo "$0: training sentencepiece model..."
-    # spm_train --bos_id=-1 --pad_id=0 --eos_id=1 --unk_id=2 --input=data/lang/input \
+    # python3 ../../scripts/spm_train.py --bos_id=-1 --pad_id=0 --eos_id=1 --unk_id=2 --input=data/lang/input \
     #   --vocab_size=$((sentencepiece_vocabsize+3)) --character_coverage=1.0 \
     #   --model_type=$sentencepiece_type --model_prefix=$sentencepiece_model \
     #   --input_sentence_size=10000000
@@ -171,11 +171,6 @@ if [ ${stage} -le 3 ]; then
       token_text=data/$dataset/token_text
       spm_encode --model=${sentencepiece_model}.model --output_format=piece \
         <(cut -f 2- -d" " $text) | paste -d" " <(cut -f 1 -d" " $text) - > $token_text
-      # if [ "$dataset" == "$train_set" ]; then
-      #   cut -f 2- -d" " $token_text | tr ' ' '\n' | sort | uniq -c | \
-      #     awk '{print $2,$1}' | sort > $dict
-      #   wc -l $dict
-      # fi
     done
     
     echo "$0: preparing text for subword LM..."
@@ -189,7 +184,7 @@ if [ ${stage} -le 3 ]; then
     # fi
     # echo "$0: preparing extra corpus for subword LM training..."
     # zcat $lmdatadir/librispeech-lm-norm.txt.gz | \
-    #   spm_encode --model=${sentencepiece_model}.model --output_format=piece | \
+    #   python3 ../../scripts/spm_encode --model=${sentencepiece_model}.model --output_format=piece | \
     #   cat $lmdatadir/$train_set.tokens - > $lmdatadir/train.tokens
 fi
 
@@ -200,7 +195,8 @@ if [ ${stage} -le 4 ]; then
     for dataset in $test_set; do test_paths="$test_paths $lm_extra_datadir/$dataset.tokens"; done
     test_paths=$(echo $test_paths | awk '{$1=$1;print}' | tr ' ' ',')
     ${decode_cmd} $lm_log_dir/logs/preprocess.log \
-      python3 ../../preprocess.py --task language_modeling_for_asr \
+      python3 ../../preprocess.py  --user-dir espresso \
+        --task language_modeling_for_asr \
         --workers 50 --srcdict $lmdict --only-source \
         --trainpref $lm_extra_datadir/train.tokens \
         --validpref $lm_extra_datadir/dev.tokens \
@@ -224,9 +220,14 @@ if [ ${stage} -le 5 ]; then
     
     for i in $(seq 0 $num); do 
         log_file=$lm_log_dir/evaluation_${test_set_array[$i]}.log
-        python3 ../../eval_lm.py $lm_extra_datadir --cpu \
-            --task language_modeling_for_asr --dict $lmdict --gen-subset ${gen_set_array[$i]} \
-            --max-tokens 40960 --max-sentences 1536 --sample-break-mode eos \
+        python3 ../../eval_lm.py $lm_extra_datadir \
+            --cpu \
+            --user-dir espresso \
+            --task language_modeling_for_asr \
+            --dict $lmdict --gen-subset ${gen_set_array[$i]} \
+            --max-tokens 40960 \
+            --max-sentences 1536 \
+            --sample-break-mode eos \
             --path $lm_pretrained/$lm_checkpoint 2>&1 | tee $log_file
     done
 
@@ -249,18 +250,37 @@ if [ ${stage} -le 6 ]; then
     log_file=$lmdir/logs/train.log
     lm_lr=0.0005   # Previousely 0.001
     [ -f $lmdir/checkpoint_last.pt ] && log_file="-a $log_file"
-    CUDA_VISIBLE_DEVICES=$free_gpu python3 ../../train.py $lm_extra_datadir --seed 1 \
-        --task language_modeling_for_asr --dict $lmdict \
-        --log-interval 8000 --log-format simple \
-        --num-workers 0 --max-tokens 30720 --max-sentences 1024 \
-        --valid-subset $valid_subset --max-sentences-valid 1536 \
-        --distributed-world-size $ngpus --distributed-port 100 \
-        --max-epoch 50 --optimizer adam --lr $lm_lr --clip-norm 1.0 \
-        --lr-scheduler reduce_lr_on_plateau --lr-shrink 0.5 \
-        --save-dir $lmdir --restore-file checkpoint_init.pt --save-interval-updates 8000 \
-        --keep-interval-updates 3 --keep-last-epochs 5 --validate-interval 1 \
-        --arch lstm_lm_librispeech --criterion cross_entropy --sample-break-mode eos \
-        --reset-lr-scheduler --reset-meters --reset-dataloader --reset-optimizer  2>&1 | tee $log_file
+    CUDA_VISIBLE_DEVICES=$free_gpu python3 ../../train.py $lm_extra_datadir \
+        --seed 1 \
+        --usr-dir espresso \
+        --task language_modeling_for_asr \
+        --dict $lmdict \
+        --log-interval 8000 \
+        --log-format simple \
+        --num-workers 0 \
+        --max-tokens 30720 \
+        --max-sentences 1024 \
+        --valid-subset $valid_subset \
+        --max-sentences-valid 1536 \
+        --distributed-world-size $ngpus \
+        --distributed-port 100 \
+        --max-epoch 50 \
+        --optimizer adam \
+        --lr $lm_lr \
+        --clip-norm 1.0 \
+        --lr-scheduler reduce_lr_on_plateau \
+        --lr-shrink 0.5 \
+        --save-dir $lmdir \
+        --restore-file checkpoint_init.pt \
+        --save-interval-updates 8000 \
+        --keep-interval-updates 3 \
+        --keep-last-epochs 5 \
+        --validate-interval 1 \
+        --arch lstm_lm_librispeech \
+        --criterion cross_entropy \
+        --sample-break-mode eos \
+        --reset-lr-scheduler --reset-meters \
+        --reset-dataloader --reset-optimizer  2>&1 | tee $log_file
 fi
 
 if [ ${stage} -le 7 ]; then
@@ -269,15 +289,19 @@ if [ ${stage} -le 7 ]; then
     num=$(echo $test_set | awk '{print NF-1}')
     for i in $(seq $num); do gen_set_array[$i]="test$i"; done
     test_set_array=($test_set)
-    mkdir -p $lm_log_dir
     
     for i in $(seq 0 $num); do 
-        log_file=$lm_log_dir/evaluation_${test_set_array[$i]}.log
-        python3 ../../eval_lm.py $lm_extra_datadir --cpu \
-            --task language_modeling_for_asr --dict $lmdict --gen-subset ${gen_set_array[$i]} \
-            --max-tokens 40960 --max-sentences 1536 --sample-break-mode eos \
+        log_file=$lmdir/logs/evaluation_${test_set_array[$i]}.log
+        python3 ../../eval_lm.py $lm_extra_datadir \
+            --cpu \
+            --user-dir espresso \
+            --task language_modeling_for_asr \
+            --dict $lmdict \
+            --gen-subset ${gen_set_array[$i]} \
+            --max-tokens 40960 \
+            --max-sentences 1536 \
+            --sample-break-mode eos \
             --path $lmdir/$lm_checkpoint 2>&1 | tee $log_file
-
     done
 fi
 
@@ -292,7 +316,10 @@ if [ ${stage} -le 8 ]; then
     mkdir -p $dir/logs
     log_file=$dir/logs/train.log
     [ -f $dir/checkpoint_last.pt ] && log_file="-a $log_file"
-    CUDA_VISIBLE_DEVICES=$free_gpu speech_train.py --seed 1 \
+    CUDA_VISIBLE_DEVICES=$free_gpu speech_train.py \
+        --seed 1 \
+        --task speech_recognition_espresso \
+        --user-dir espresso \
         --log-interval 4000 \
         --log-format simple \
         --print-training-sample-interval 2000 \
@@ -302,7 +329,7 @@ if [ ${stage} -le 8 ]; then
         --valid-subset $valid_subset \
         --max-sentences-valid 48 \
         --distributed-world-size $ngpus \
-        --distributed-port 100 \
+        --distributed-port $(if [ $ngpus -gt 1 ]; then echo 100; else echo -1; fi) \
         --ddp-backend no_c10d \
         --max-epoch 25 \
         --optimizer adam \
@@ -321,7 +348,7 @@ if [ ${stage} -le 8 ]; then
         --validate-interval 1 \
         --best-checkpoint-metric wer \
         --arch speech_conv_lstm_librispeech \
-        --criterion label_smoothed_cross_entropy_with_wer \
+        --criterion label_smoothed_cross_entropy_v2 \
         --label-smoothing 0.1 \
         --smoothing-type uniform \
         --scheduled-sampling-probs 1.0 \
@@ -343,13 +370,16 @@ if [ ${stage} -le 9 ]; then
   decode_affix=
   if $lm_shallow_fusion; then
     path="$path:$lmdir/$lm_checkpoint"
-    opts="$opts --lm-weight 0.4 --coverage-weight 0.0 --eos-factor 1.5"
+    opts="$opts --lm-weight 0.47 --eos-factor 1.5"
     decode_affix=shallow_fusion
   fi
   for dataset in $test_set; do
     feat=${dumpdir}/$dataset/delta${do_delta}/feats.scp
     text=data/$dataset/token_text
     CUDA_VISIBLE_DEVICES=$(echo $free_gpu | sed 's/,/ /g' | awk '{print $1}') speech_recognize.py \
+        --task speech_recognition_espresso \
+        --usr-dir espresso \
+################## FIX ME ###########
       --max-tokens 15000 --max-sentences 24 --num-shards 1 --shard-id 0 \
       --test-feat-files $feat --test-text-files $text \
       --dict $dict --remove-bpe sentencepiece \
